@@ -1,213 +1,184 @@
+use crate::csv_operation::{create_file, handle_query, write_data};
+use sqlparser::ast::{
+    CreateTable, Expr, Insert, Query, Select, SelectItem, SetExpr, Statement, TableFactor,
+    TableWithJoins, Value,
+};
+use sqlparser::dialect::MySqlDialect;
+use sqlparser::parser::Parser;
 use std::error::Error;
 
-pub struct CreateTableNode {
-    pub(crate) table_name: String,
-    pub(crate) field_list: Vec<String>,
-}
-
-pub struct InsertNode {
-    pub(crate) table_name: String,
-    pub(crate) data_list: Vec<String>,
-}
-
-pub struct SelectNode {
-    pub(crate) table_name: String,
-    pub(crate) fields: Vec<String>,
-    pub(crate) limit: i32,
-}
-
-pub fn parse_create_table(sql: &str) -> Result<CreateTableNode, Box<dyn Error>> {
-    let sql = sql.to_lowercase().replace(";", "");
-    let tokens: Vec<&str> = sql.split_whitespace().collect();
-
-    if tokens.len() < 3 || tokens[0] != "create" || tokens[1] != "table" {
-        return Err("Invalid CREATE TABLE syntax".into());
-    }
-
-    let table_name = tokens[2].to_string();
-
-    // 找到左括号的位置
-    let Some(left_paren) = sql.find('(') else {
-        return Err("Missing opening parenthesis in CREATE TABLE statement".into());
-    };
-
-    // 找到右括号的位置
-    let Some(right_paren) = sql.find(')') else {
-        return Err("Missing closing parenthesis in CREATE TABLE statement".into());
-    };
-
-    // 提取括号内的字段定义部分
-    let fields_content = &sql[left_paren + 1..right_paren];
-
-    // 分割字段定义
-    let mut field_list = Vec::new();
-    for field_def in fields_content.split(',') {
-        let parts: Vec<&str> = field_def
-            .split_whitespace()
-            .filter(|s| !s.is_empty())
-            .collect();
-
-        if parts.len() >= 2 {
-            let name = parts[0].to_string();
-            //类型我们先不管，全部当string
-            field_list.push(name);
+pub fn handle(sql: &str) -> Result<String, Box<dyn Error>> {
+    let dialect = MySqlDialect {};
+    let mut stmts = Parser::parse_sql(&dialect, sql).unwrap();
+    let stmt = stmts.swap_remove(0);
+    match stmt {
+        Statement::Query(q) => {
+            let table_name = extract_table_name_from_query(q.as_ref()).unwrap();
+            let fields = extract_select_fields_from_query(q.as_ref());
+            let limit = extract_limit_from_query(q.as_ref()).unwrap();
+            Ok(format_result(handle_query(table_name, fields, limit)?))
         }
-    }
-
-    Ok(CreateTableNode {
-        table_name,
-        field_list,
-    })
-}
-
-pub fn parse_select(sql: &str) -> Result<SelectNode, Box<dyn Error>> {
-    let sql = sql.to_lowercase().replace(";", "");
-    let tokens: Vec<&str> = sql.split_whitespace().collect();
-
-    if tokens.is_empty() || tokens[0] != "select" {
-        return Err("Invalid SELECT syntax: missing 'SELECT'".into());
-    }
-
-    // 找到 "from" 关键字的位置
-    let from_index = match tokens.iter().position(|&t| t == "from") {
-        Some(index) => index,
-        None => return Err("Invalid SELECT syntax: missing 'FROM'".into()),
-    };
-
-    // 提取字段部分（在 select 和 from 之间）
-    let fields = tokens[1..from_index]
-        .iter()
-        .flat_map(|&token| token.split(','))
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<String>>();
-
-    if fields.is_empty() {
-        return Err("No fields specified in SELECT statement".into());
-    }
-
-    // 表名必须在 "from" 之后
-    let table_name = if from_index + 1 < tokens.len() {
-        tokens[from_index + 1].to_string()
-    } else {
-        return Err("Missing table name after 'FROM'".into());
-    };
-
-    // 检查是否有 limit
-    let mut limit = 0;
-    if let Some(limit_index) = tokens.iter().position(|&t| t == "limit") {
-        if limit_index + 1 < tokens.len() {
-            let limit_parse_result = tokens[limit_index + 1].parse::<i32>();
-            if (limit_parse_result.is_err()) {
-                return Err("Parse limit error".into());
+        Statement::CreateTable(c) => {
+            let (table_name, columns) = parse_create_table(c)?;
+            let result = create_file(table_name, columns);
+            if result.is_err() {
+                return Err(result.unwrap_err().into());
             }
-            limit = limit_parse_result.unwrap();
-        } else {
-            return Err("Missing value after 'LIMIT'".into());
+            Ok("Create table success".to_string())
         }
+        Statement::Insert(i) => {
+            let (table_name, values) = parse_insert(i)?;
+            let result = write_data(table_name, values);
+            if result.is_err() {
+                return Err(result.unwrap_err().into());
+            }
+            Ok("Insert table success".to_string())
+        }
+        _ => Err(format!("Unsupported type: {:?}", stmt).into()),
     }
-
-    Ok(SelectNode {
-        table_name,
-        fields,
-        limit,
-    })
 }
 
-pub fn parse_insert(sql: &str) -> Result<InsertNode, Box<dyn Error>> {
-    let mut sql = sql.replace(";", "");
-    sql.retain(|c| !['(', ')', '\''].contains(&c)); // 去掉括号和单引号
+// 解析 CREATE TABLE 语句，返回 (table_name, columns)
+pub fn parse_create_table(c: CreateTable) -> Result<(String, Vec<String>), Box<dyn Error>> {
+    let table_name = c.name.0.first().ok_or("Table name is empty")?.value.clone();
 
-    let tokens: Vec<&str> = sql.split_whitespace().collect();
+    let column_names: Vec<String> = c
+        .columns
+        .iter()
+        .filter_map(|col| col.name.value.clone().into())
+        .collect();
 
-    if tokens.len() < 5
-        || tokens[0].to_lowercase() != "insert"
-        || tokens[1].to_lowercase() != "into"
-        || tokens[3].to_lowercase() != "values"
-    {
-        return Err("Invalid INSERT syntax".into());
-    }
-
-    let table_name = tokens[2].to_string();
-
-    let mut data_list = Vec::new();
-
-    for chunk in tokens[4..].iter() {
-        let mut chunk_str = chunk.to_string();
-        chunk_str.retain(|c| ![','].contains(&c));
-        data_list.push(chunk_str);
-    }
-
-    Ok(InsertNode {
-        table_name: table_name,
-        data_list: data_list,
-    })
+    Ok((table_name, column_names))
 }
 
+fn format_result(rows: Vec<Vec<String>>) -> String {
+    rows.into_iter()
+        .map(|row| row.join(", "))
+        .collect::<Vec<String>>()
+        .join("\n")
+}
+fn extract_limit_from_query(query: &Query) -> Option<i32> {
+    match &query.limit {
+        Some(Expr::Value(sqlparser::ast::Value::Number(s, _))) => s.parse::<i32>().ok(),
+        _ => None,
+    }
+}
+
+// 提取整个 Query 中的字段名
+pub fn extract_select_fields_from_query(query: &Query) -> Vec<String> {
+    match &*query.body {
+        SetExpr::Select(select) => extract_select_fields_from_select(select.as_ref()),
+        _ => vec![],
+    }
+}
+
+// 提取 Select 结构中的字段名
+fn extract_select_fields_from_select(select: &Select) -> Vec<String> {
+    select
+        .projection
+        .iter()
+        .filter_map(|item| match item {
+            SelectItem::UnnamedExpr(expr) => expr_to_string(expr),
+            SelectItem::ExprWithAlias { expr, .. } => expr_to_string(expr),
+            SelectItem::QualifiedWildcard(_, _) => Some("*".to_string()),
+            SelectItem::Wildcard(_) => Some("*".to_string()),
+        })
+        .collect()
+}
+
+// 将表达式转成字符串表示（如列名）
+fn expr_to_string(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Identifier(ident) => Some(ident.value.clone()),
+        Expr::CompoundIdentifier(idents) => Some(
+            idents
+                .iter()
+                .map(|i| i.value.clone())
+                .collect::<Vec<String>>()
+                .join("."),
+        ),
+        _ => None,
+    }
+}
+
+fn extract_table_name_from_query(query: &Query) -> Option<String> {
+    match &*query.body {
+        SetExpr::Select(select) => extract_table_name_from_select(select.as_ref()),
+        _ => None,
+    }
+}
+
+fn extract_table_name_from_select(select: &Select) -> Option<String> {
+    select
+        .from
+        .iter()
+        .find_map(|t| extract_table_name_from_table_with_joins(t))
+}
+
+fn extract_table_name_from_table_with_joins(twj: &TableWithJoins) -> Option<String> {
+    match &twj.relation {
+        TableFactor::Table { ref name, .. } => name.0.first().map(|ident| ident.value.clone()),
+        _ => None,
+    }
+}
+
+// 提取 INSERT 语句中的表名和插入数据
+pub fn parse_insert(insert: Insert) -> Result<(String, Vec<String>), Box<dyn Error>> {
+    let table_name = insert
+        .table_name
+        .0
+        .first()
+        .ok_or("Empty table name in INSERT statement")?
+        .value
+        .clone();
+
+    let data_list = if let Some(ref source) = insert.source {
+        match **source {
+            Query { ref body, .. } => {
+                if let SetExpr::Values(ref values) = **body {
+                    values
+                        .rows
+                        .iter()
+                        .flat_map(|row| row.iter())
+                        .filter_map(|expr| match expr {
+                            Expr::Value(Value::SingleQuotedString(s)) => Some(s.clone()),
+                            Expr::Value(Value::Number(s, _)) => Some(s.clone()),
+                            _ => None,
+                        })
+                        .collect()
+                } else {
+                    return Err("Only VALUES are supported in INSERT statements".into());
+                }
+            }
+        }
+    } else {
+        return Err("No source provided in INSERT statement".into());
+    };
+
+    Ok((table_name, data_list))
+}
 #[cfg(test)]
 mod test {
-    use crate::sql_parse::{parse_create_table, parse_insert, parse_select};
+
+    use sqlparser::ast::Statement;
+
+    use sqlparser::dialect::MySqlDialect;
+    use sqlparser::parser::Parser;
 
     #[test]
-    fn test_parse_insert() {
-        let insert_sql =
-            "insert into test1 values ('Southborough', 'MA', 'United_States', '9686');";
+    fn test_sql_parse_example() {
+        let sql = "SELECT a, b, 123, myfunc(b) \
+           FROM table_1 \
+           WHERE a > b AND b < 100 \
+           ORDER BY a DESC, b";
 
-        let result = parse_insert(insert_sql);
-        assert_eq!(result.is_ok(), true);
-        let node = result.unwrap();
-        assert_eq!(node.table_name, "test1");
-        assert_eq!(
-            node.data_list,
-            vec!["Southborough", "MA", "United_States", "9686"]
-        )
-    }
-
-    #[test]
-    fn test_parse_insert_fail() {
-        let insert_sql =
-            "insert into test1 vlaues ('Southborough', 'MA', 'United_States', '9686');";
-
-        let result = parse_insert(insert_sql);
-        assert_eq!(result.is_err(), true);
-    }
-
-    #[test]
-    fn test_parse_select() {
-        let select_sql = "select f1, f2 from test1 limit 10;";
-        let result = parse_select(select_sql);
-        assert_eq!(result.is_ok(), true, "error is {:#?}", result.err());
-        let node = result.unwrap();
-        assert_eq!(node.table_name, "test1");
-        assert_eq!(node.limit, 10);
-        assert_eq!(node.fields, vec!["f1", "f2"]);
-    }
-    
-    #[test]
-    fn test_parse_select_fail() {
-        let select_sql = "seletc f1, f2 from test1 limit 10;";
-        let result = parse_select(select_sql);
-        assert_eq!(result.is_err(), true);
-    }
-    
-    #[test]
-    fn test_parse_create_table() {
-        let create_sql = "CREATE TABLE users (id INT, name TEXT);";
-    
-        let result = parse_create_table(create_sql);
-        assert!(result.is_ok());
-    
-        let node = result.unwrap();
-        assert_eq!(node.table_name, "users");
-        assert_eq!(node.field_list.len(), 2);
-        assert_eq!(node.field_list[0], "id");
-        assert_eq!(node.field_list[1], "name");
-    }
-    
-    #[test]
-    fn test_parse_create_table_missing_paren() {
-        let create_sql = "CREATE TABLE users id INT, name TEXT);";
-        let result = parse_create_table(create_sql);
-        assert!(result.is_err());
+        let dialect = MySqlDialect {};
+        let mut stmts = Parser::parse_sql(&dialect, sql).unwrap();
+        println!("AST: {:?}", stmts);
+        let stmt = stmts.swap_remove(0);
+        match stmt {
+            Statement::Query(q) => println!("query struct: {:?}", q),
+            _ => println!("Unsupported type:  {:?}", stmt),
+        }
     }
 }

@@ -1,4 +1,4 @@
-use crate::sql_parse::{InsertNode, SelectNode};
+
 use crate::PATH;
 use csv::ErrorKind::Io;
 use std::any::Any;
@@ -32,10 +32,8 @@ pub fn create_file(table_name: String, field_list: Vec<String>) -> Result<(), Bo
     }
     Ok(())
 }
-pub(crate) fn write_data(node: InsertNode) -> Result<(), Box<dyn Error>> {
-    write_data_inner(node.table_name, node.data_list)
-}
-fn write_data_inner(table_name: String, dataList: Vec<String>) -> Result<(), Box<dyn Error>> {
+
+pub fn write_data(table_name: String, dataList: Vec<String>) -> Result<(), Box<dyn Error>> {
     let (_, path_str) = generate_file_path(table_name);
     let file_path = Path::new(&path_str);
 
@@ -54,10 +52,8 @@ fn write_data_inner(table_name: String, dataList: Vec<String>) -> Result<(), Box
     }
     Ok(())
 }
-pub fn read_data(node: SelectNode) -> Result<Vec<Vec<String>>, Box<dyn Error>> {
-    read_data_inner(node.table_name, node.fields, node.limit)
-}
-fn read_data_inner(
+
+pub fn handle_query(
     table_name: String,
     fields: Vec<String>,
     limit: i32,
@@ -124,7 +120,7 @@ fn generate_file_path(table_name: String) -> (String, String) {
 #[cfg(test)]
 mod test {
     use crate::csv_operation::{
-        create_file, generate_file_path, read_data_inner, write_data_inner,
+        create_file, generate_file_path, handle_query, write_data,
     };
     use std::fs;
     use std::path::Path;
@@ -153,7 +149,7 @@ mod test {
             "doge".to_string(),
             "18".to_string(),
         ];
-        let result1 = write_data_inner("test1".to_string(), data1);
+        let result1 = write_data("test1".to_string(), data1);
         assert!(result1.is_ok());
 
         let data2 = Vec::from([
@@ -161,13 +157,13 @@ mod test {
             "doge".to_string(),
             "18".to_string(),
         ]);
-        let result2 = write_data_inner("test1".to_string(), data2);
+        let result2 = write_data("test1".to_string(), data2);
         assert!(result2.is_ok());
     }
 
     #[test]
     fn test_read() {
-        let result = read_data_inner("test1".to_string(), Vec::from(["name".to_string()]), 100);
+        let result = handle_query("test1".to_string(), Vec::from(["name".to_string()]), 100);
         assert!(result.is_ok());
         println!("{:?}", result.unwrap())
     }
