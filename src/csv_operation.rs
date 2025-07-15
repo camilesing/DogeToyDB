@@ -1,10 +1,8 @@
 
 use crate::PATH;
-use csv::ErrorKind::Io;
 use std::any::Any;
 use std::error::Error;
 use std::fs::File;
-use std::io;
 use std::ops::Deref;
 use std::path::Path;
 
@@ -13,7 +11,7 @@ pub fn create_file(table_name: String, field_list: Vec<String>) -> Result<(), Bo
     let file_path = Path::new(&schema_path_str);
 
     let mut open_file_result = File::open(&file_path);
-    if (open_file_result.is_ok()) {
+    if open_file_result.is_ok() {
         return Err("File is exist".into());
     }
 
